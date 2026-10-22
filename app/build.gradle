@@ -1,0 +1,292 @@
+plugins {
+    id 'com.android.application'
+}
+
+def localProps = new Properties()
+def localPropsFile = rootProject.file('local.properties')
+if (localPropsFile.exists()) {
+    localPropsFile.withInputStream { stream ->
+        localProps.load(stream)
+    }
+}
+
+def escapeBuildConfigString = { String value ->
+    '"' + (value ?: '').replace('\\', '\\\\').replace('"', '\\"') + '"'
+}
+
+def defaultBaseUrl = localProps.getProperty('metaApk.baseUrl', 'https://openrouter.ai/api/v1')
+def defaultApiKey = localProps.getProperty('metaApk.apiKey', '')
+def defaultModel = localProps.getProperty('metaApk.model', 'nvidia/nemotron-3-ultra-550b-a55b:free')
+def defaultBackupModel = localProps.getProperty('metaApk.backupModel', 'openrouter/free')
+
+// Release signing credentials come from keystore.properties (git-ignored).
+// See keystore.properties.example.
+def keystoreProps = new Properties()
+def keystorePropsFile = rootProject.file('keystore.properties')
+if (keystorePropsFile.exists()) {
+    keystorePropsFile.withInputStream { stream ->
+        keystoreProps.load(stream)
+    }
+}
+
+configurations {
+    hostInterfaceEmbed {
+        canBeConsumed = false
+        canBeResolved = true
+    }
+}
+
+def hostInterfaceEmbedTrees = configurations.hostInterfaceEmbed.elements.map { files ->
+    files.collect { zipTree(it.asFile) }
+}
+
+android {
+    namespace 'com.meta.app'
+    compileSdk 35
+    buildToolsVersion "36.1.0"
+
+    buildFeatures {
+        buildConfig true
+    }
+
+    defaultConfig {
+        applicationId "com.meta.app"
+        minSdk 28
+        targetSdk 35
+        versionCode 1
+        versionName "1.0.0"
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+
+        buildConfigField "String", "DEFAULT_BASE_URL", escapeBuildConfigString(defaultBaseUrl)
+        buildConfigField "String", "DEFAULT_MODEL", escapeBuildConfigString(defaultModel)
+        buildConfigField "String", "DEFAULT_BACKUP_MODEL", escapeBuildConfigString(defaultBackupModel)
+    }
+
+    signingConfigs {
+        release {
+            if (keystorePropsFile.exists()) {
+                storeFile rootProject.file(keystoreProps['storeFile'])
+                storePassword keystoreProps['storePassword']
+                keyAlias keystoreProps['keyAlias']
+                keyPassword keystoreProps['keyPassword']
+            }
+        }
+    }
+
+    buildTypes {
+        debug {
+            // Local debugging only: injects the key from local.properties.
+            // This value NEVER makes it into release builds.
+            buildConfigField "String", "DEFAULT_API_KEY", escapeBuildConfigString(defaultApiKey)
+        }
+        release {
+            // Release builds bundle NO API key. Users configure their own
+            // endpoint/key in Settings on first launch.
+            buildConfigField "String", "DEFAULT_API_KEY", '""'
+            minifyEnabled true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            // Fall back to the debug key when no release keystore is configured
+            // (keeps `assembleRelease` working on a fresh clone; official
+            // releases should always provide keystore.properties).
+            if (keystorePropsFile.exists()) {
+                signingConfig signingConfigs.release
+            } else {
+                signingConfig signingConfigs.debug
+            }
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+
+    // Exclude files that conflict with Android inside ECJ
+    packaging {
+        resources {
+            excludes += ['META-INF/INDEX.LIST', 'META-INF/*.SF', 'META-INF/*.DSA', 'META-INF/*.RSA']
+        }
+    }
+
+    // ECJ / D8 need a jar containing .class files to provide the host interfaces (PluginContract / ApiBridge).
+    // An APK only contains classes.dex, which ECJ cannot read, so a dedicated host-interfaces.jar is built.
+    sourceSets {
+        main {
+            assets.srcDirs += layout.buildDirectory.dir('generated/metaAssets')
+        }
+    }
+}
+
+dependencies {
+    implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+    implementation 'com.google.code.gson:gson:2.11.0'
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+    implementation 'com.google.android.material:material:1.12.0'
+    hostInterfaceEmbed 'com.google.code.gson:gson:2.11.0'
+    testImplementation 'junit:junit:4.13.2'
+
+    androidTestImplementation 'androidx.test.ext:junit:1.2.1'
+    androidTestImplementation 'androidx.test:runner:1.6.2'
+    androidTestImplementation 'androidx.test.uiautomator:uiautomator:2.3.0'
+}
+
+/**
+ * Builds the host interface jar, used by ECJ / D8 as the classpath.
+ *
+ * Only the contract and runtime-compat classes actually needed by dynamic plugins are kept here, to avoid pulling host-internal classes
+ * (such as HostActivity / MetaEngine / LLMClient) into the plugin compile classpath.
+ * When those classes contain Java 17 bytecode features or host-specific dependencies, ECJ tends to report
+ * LambdaMetafactory / StringConcatFactory indirect-reference errors.
+ */
+tasks.register('jarHostInterfaces', Jar) {
+    dependsOn 'compileDebugJavaWithJavac'
+    from(layout.buildDirectory.dir('intermediates/javac/debug/compileDebugJavaWithJavac/classes')) {
+        include 'com/meta/app/MainActivity*.class'
+        include 'com/meta/app/bridge/**'
+        include 'com/meta/app/core/AssetTools*.class'
+        include 'com/meta/app/core/PluginContract*.class'
+        include 'com/meta/app/core/RuntimeCompat*.class'
+        include 'com/meta/app/sandbox/SandboxClassLoader*.class'
+        include 'com/meta/app/stub/StubReceiver*.class'
+    }
+    // Ship gson as well; JSON handling is common in plugins.
+    // Resolve lazily through a Provider to avoid resolving the configuration during the configuration phase.
+    from(hostInterfaceEmbedTrees) {
+        include 'com/google/gson/**'
+    }
+    archiveFileName = 'host-interfaces.jar'
+    destinationDirectory = layout.buildDirectory.dir('generated/metaAssets')
+}
+
+// generated/metaAssets is consumed by the asset-merge tasks and also used directly as
+// a sourceSet asset input by several lint tasks; Gradle 8 validates that dependencies between such inputs/outputs are declared.
+// Wire all lint-related and asset-merge tasks (debug and release) after jarHostInterfaces to avoid implicit-dependency errors.
+tasks.matching {
+    it.name.startsWith('merge') && it.name.endsWith('Assets')
+        || it.name.startsWith('lint') || it.name.contains('Lint')
+}.configureEach {
+    dependsOn 'jarHostInterfaces'
+}
+
+/**
+ * ECJ's resource bundles are dropped during dexing (.properties files are not .class files),
+ * which makes ResourceBundle.getBundle throw MissingResourceException at runtime and
+ * the ECJ constructor fail outright.
+ *
+ * This task injects every .properties file under app/ecj-resources/ back into ecj.dex.jar at its original package path,
+ * so the DexClassLoader can find them through ClassLoader.getResource.
+ */
+tasks.register('injectEcjResources') {
+    def ecjJar = file('src/main/assets/ecj.dex.jar')
+    def resourceRoot = file('ecj-resources')
+
+    inputs.file(ecjJar).withPathSensitivity(PathSensitivity.RELATIVE)
+    inputs.dir(resourceRoot).withPathSensitivity(PathSensitivity.RELATIVE)
+    outputs.upToDateWhen { false }
+
+    doLast {
+        if (!ecjJar.exists() || !resourceRoot.exists()) {
+            logger.warn("injectEcjResources: missing ${ecjJar} or ${resourceRoot}, skipping")
+            return
+        }
+        def resources = []
+        resourceRoot.eachFileRecurse { f ->
+            if (f.isFile() && f.name.endsWith('.properties')) {
+                def rel = resourceRoot.toPath().relativize(f.toPath()).toString().replace('\\', '/')
+                resources << [path: rel, file: f]
+            }
+        }
+        if (resources.isEmpty()) {
+            logger.warn("injectEcjResources: no properties available to inject")
+            return
+        }
+
+        def tmp = new File(ecjJar.parentFile, ecjJar.name + '.tmp')
+        tmp.bytes = ecjJar.bytes
+
+        // Do not re-inject entries that already exist, keeping the task re-runnable
+        def existing = [] as Set
+        def reader = new java.util.zip.ZipFile(tmp, java.util.zip.ZipFile.OPEN_READ)
+        reader.entries().each { e -> existing << e.name }
+        reader.close()
+
+        def toInject = resources.findAll { r -> !existing.contains(r.path) }
+        if (toInject.isEmpty()) {
+            tmp.delete()
+            logger.lifecycle("injectEcjResources: resource bundles already complete, skipping")
+            return
+        }
+
+        def out = new java.util.zip.ZipOutputStream(new FileOutputStream(tmp))
+        def src = new java.util.zip.ZipFile(ecjJar, java.util.zip.ZipFile.OPEN_READ)
+        src.entries().each { e ->
+            out.putNextEntry(new java.util.zip.ZipEntry(e.name))
+            out << src.getInputStream(e)
+            out.closeEntry()
+        }
+        src.close()
+        toInject.each { r ->
+            out.putNextEntry(new java.util.zip.ZipEntry(r.path))
+            out << r.file.bytes
+            out.closeEntry()
+            logger.lifecycle("injectEcjResources: injected ${r.path}")
+        }
+        out.close()
+        ecjJar.bytes = tmp.bytes
+        tmp.delete()
+    }
+}
+
+tasks.matching { it.name == 'preBuild' }.configureEach {
+    dependsOn 'injectEcjResources'
+}
+
+/**
+ * Regression guard: classes needed at runtime through a classloader other
+ * than the app's own (the ECJ dex resolves javax.lang.model.SourceVersion
+ * via the parent classloader; plugins resolve the ABI classes and gson by
+ * name) must survive R8 shrinking. Scans every dex in the release APK for
+ * the required descriptors and fails the build if any is missing.
+ */
+tasks.register('verifyReleaseAbiClasses') {
+    dependsOn 'packageRelease'
+    doLast {
+        def apkFile = file('build/outputs/apk/release/app-release.apk')
+        if (!apkFile.exists()) {
+            throw new GradleException('app-release.apk not found')
+        }
+        def required = [
+            'javax/lang/model/SourceVersion',
+            'com/meta/app/bridge/ApiBridge',
+            'com/meta/app/core/PluginContract',
+            'com/meta/app/sandbox/SandboxClassLoader',
+            'com/meta/app/stub/StubReceiver$R01',
+            'com/google/gson/stream/JsonReader'
+        ]
+        def apk = new java.util.zip.ZipFile(apkFile)
+        def dexEntries = apk.entries().findAll { it.name.matches(/^classes\d*\.dex$/) }
+        if (dexEntries.isEmpty()) {
+            apk.close()
+            throw new GradleException('No classes.dex found in the release APK')
+        }
+        // String.contains (indexOf) is JIT-optimized and orders of magnitude
+        // faster than a hand-rolled byte-by-byte loop in Groovy.
+        def checked = required.toSet()
+        for (entry in dexEntries) {
+            if (checked.isEmpty()) break
+            String text = apk.getInputStream(entry).getText('ISO-8859-1')
+            checked.removeAll { name -> text.contains(name) }
+        }
+        apk.close()
+        if (!checked.isEmpty()) {
+            throw new GradleException(
+                'Release APK is missing runtime-required classes (stripped by R8): '
+                    + checked.sort().join(', '))
+        }
+        logger.lifecycle('verifyReleaseAbiClasses: all required classes present')
+    }
+}
+
+tasks.matching { it.name == 'assembleRelease' }.configureEach {
+    dependsOn 'verifyReleaseAbiClasses'
+}
