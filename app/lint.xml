@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Quality gate: lintDebug must stay at 0 errors / 0 warnings. The few
+     deliberate ignores below are each justified; everything else is fixed
+     in code or resources. -->
+<lint>
+    <!-- The adaptive launcher icon is a generated template asset with long
+         vector paths; hand-simplifying it would hurt icon quality for a
+         one-time inflation cost. -->
+    <issue id="VectorPath">
+        <ignore path="src/main/res/mipmap-anydpi" />
+        <ignore path="src/main/res/drawable/ic_launcher_foreground.xml" />
+        <ignore path="src/main/res/drawable/ic_launcher_monochrome.xml" />
+    </issue>
+    <!-- "crashed N times in a row" reads naturally in English with %d and
+         Chinese has no plural forms at all; a plurals resource would add
+         ceremony without fixing a real defect. -->
+    <issue id="PluralsCandidate">
+        <ignore path="src/main/res/values/strings.xml" />
+        <ignore path="src/main/res/values-zh/strings.xml" />
+    </issue>
+</lint>
