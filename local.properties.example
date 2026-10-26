@@ -1,0 +1,12 @@
+# Copy this file to local.properties and fill in your own values (local.properties is git-ignored and never committed).
+# Copy this file to local.properties and fill in your own values.
+# (local.properties is git-ignored and will never be committed.)
+
+# Local Android SDK path
+sdk.dir=C\:\\path\\to\\your\\Android\\Sdk
+
+# LLM debug defaults (for local testing only)
+metaApk.baseUrl=https://openrouter.ai/api/v1
+metaApk.apiKey=YOUR_API_KEY_HERE
+metaApk.model=nvidia/nemotron-3-ultra-550b-a55b:free
+metaApk.backupModel=openrouter/free
