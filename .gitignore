@@ -1,0 +1,36 @@
+# Gradle
+.gradle/
+build/
+app/build/
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Secrets: local SDK path and debug API key; never committed
+# Copy local.properties.example to local.properties and fill in your own values
+local.properties
+
+# Android Studio / IDEA
+.idea/
+*.iml
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Local maintenance scripts (rebuilding the embedded ECJ compiler; not needed for normal builds/usage)
+tools/
+
+# Local test artifacts
+*.hprof
+
+# Local design/planning notes (not part of the repository)
+meta-app-design.md
+
+# 签名密钥（绝不入库）
+keystore.properties
+keystore/
