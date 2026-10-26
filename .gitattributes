@@ -1,0 +1,7 @@
+# Line-ending policy: every text file is stored and checked out as LF.
+# Explicit here because core.autocrlf varies by machine and silently
+# rewrites endings - that variance is what kept triggering "LF will be
+# replaced by CRLF" warnings. Windows batch files stay CRLF: cmd.exe can
+# mis-parse LF-only .bat files.
+* text=auto eol=lf
+*.bat text eol=crlf
